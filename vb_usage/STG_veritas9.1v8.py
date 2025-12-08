@@ -86,7 +86,6 @@ def collect_metrics():
     def fetch_all_pages(initial_url):
         """Получить все страницы ответа NetBackup, следуя ссылкам next."""
         url = initial_url
-        all_data = []
         visited = set()
 
         while url and url not in visited:
@@ -95,24 +94,24 @@ def collect_metrics():
             response = session.get(url, headers=headers, verify=False, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             payload = response.json()
-            all_data.extend(payload.get('data', []))
+
+            for item in payload.get('data', []):
+                yield item
 
             links = payload.get('links', {}) or {}
             next_link = links.get('next')
             next_href = next_link.get('href') if isinstance(next_link, dict) else next_link
             url = urljoin(url, next_href) if next_href else None
 
-        return all_data
-
     # Метрики заданий
     def job_collect():
         jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=200"
-        job_data = fetch_all_pages(jobs_url)
+        recent_threshold = (datetime.utcnow() - timedelta(hours=HOURS_24)).timestamp()
 
         gauge_jobs_status.clear()
         gauge_24h_jobs_status.clear()
 
-        for job in job_data:
+        for job in fetch_all_pages(jobs_url):
             attrs = job.get('attributes', {})
             job_id = job.get('id', 'unknown')
             start_time = parse_time(attrs.get('startTime'))
@@ -129,7 +128,7 @@ def collect_metrics():
             ).set(1)
 
             # Пишем метрику для последних 24 часов, если задание в этом периоде
-            if is_within_24h(start_time):
+            if start_time and start_time >= recent_threshold:
                 gauge_24h_jobs_status.labels(
                     status=attrs.get('status'),
                     startTime=start_time,
@@ -145,13 +144,12 @@ def collect_metrics():
     # Метрики хранилища — собираем все страницы один раз
     def storage_collect():
         storage_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=200"
-        storage_data = fetch_all_pages(storage_url)
 
         gauge_storage_used_capacity.clear()
         gauge_storage_total_capacity.clear()
         gauge_storage_free_capacity.clear()
 
-        for storage in storage_data:
+        for storage in fetch_all_pages(storage_url):
             attrs = storage.get('attributes', {})
             storage_id = storage.get('id', 'unknown')
 
