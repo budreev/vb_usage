@@ -4,7 +4,7 @@ import urllib3
 from prometheus_client import start_http_server, Gauge
 import time
 from datetime import datetime, timedelta
-import socketgit
+from urllib.parse import urljoin
 import sys
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -29,6 +29,22 @@ gauge_24h_jobs_status = Gauge('nbu_24h_jobs_status', 'Backup Job Status (last 24
 gauge_storage_used_capacity = Gauge('nbu_storage_used_capacity', 'Storage Used Capacity', ['storage_id'])
 gauge_storage_free_capacity = Gauge('nbu_storage_free_capacity', 'Storage Free Capacity', ['storage_id'])
 gauge_storage_total_capacity = Gauge('nbu_storage_total_capacity', 'Storage Total Capacity', ['storage_id'])
+
+headers = {
+    'Authorization': NBU_API_KEY,
+    'Accept': 'application/vnd.netbackup+json;version=6.0'
+}
+
+session = requests.Session()
+retries = Retry(
+    total=MAX_RETRIES,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"]
+)
+adapter = HTTPAdapter(max_retries=retries)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 
 def parse_time(timestamp):
@@ -67,25 +83,54 @@ def is_within_24h(timestamp):
 
 # Собираем метрики
 def collect_metrics():
+    def fetch_all_pages(initial_url):
+        """Получить все страницы ответа NetBackup, следуя ссылкам next."""
+        url = initial_url
+        all_data = []
+        visited = set()
+
+        while url and url not in visited:
+            visited.add(url)
+
+            response = session.get(url, headers=headers, verify=False, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+            all_data.extend(payload.get('data', []))
+
+            links = payload.get('links', {}) or {}
+            next_link = links.get('next')
+            next_href = next_link.get('href') if isinstance(next_link, dict) else next_link
+            url = urljoin(url, next_href) if next_href else None
+
+        return all_data
+
     # Метрики заданий
     def job_collect():
-        jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=1000"
-        headers = {'Authorization': NBU_API_KEY, 'Accept': 'application/vnd.netbackup+json;version=6.0'}
-
-        job_response = requests.get(jobs_url, headers=headers, verify=False)
-        job_data = job_response.json()
+        jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=200"
+        job_data = fetch_all_pages(jobs_url)
 
         gauge_jobs_status.clear()
         gauge_24h_jobs_status.clear()
 
-        if 'data' in job_data:
-            for job in job_data['data']:
-                attrs = job.get('attributes', {})
-                job_id = job.get('id', 'unknown')
-                start_time = parse_time(attrs.get('startTime'))
+        for job in job_data:
+            attrs = job.get('attributes', {})
+            job_id = job.get('id', 'unknown')
+            start_time = parse_time(attrs.get('startTime'))
 
-                # Пишем основную метрику
-                gauge_jobs_status.labels(
+            # Пишем основную метрику
+            gauge_jobs_status.labels(
+                status=attrs.get('status'),
+                startTime=start_time,
+                endTime=parse_time(attrs.get('endTime')),
+                policyName=attrs.get('policyName'),
+                jobType=attrs.get('jobType'),
+                jobState=attrs.get('state'),
+                jobId=job_id
+            ).set(1)
+
+            # Пишем метрику для последних 24 часов, если задание в этом периоде
+            if is_within_24h(start_time):
+                gauge_24h_jobs_status.labels(
                     status=attrs.get('status'),
                     startTime=start_time,
                     endTime=parse_time(attrs.get('endTime')),
@@ -95,80 +140,26 @@ def collect_metrics():
                     jobId=job_id
                 ).set(1)
 
-                # Пишем метрику для последних 24 часов, если задание в этом периоде
-                if is_within_24h(start_time):
-                    gauge_24h_jobs_status.labels(
-                        status=attrs.get('status'),
-                        startTime=start_time,
-                        endTime=parse_time(attrs.get('endTime')),
-                        policyName=attrs.get('policyName'),
-                        jobType=attrs.get('jobType'),
-                        jobState=attrs.get('state'),
-                        jobId=job_id
-                    ).set(1)
-
     job_collect()
 
-    # Метрики хранилища
-    # Used capacity
-    def storage_used_collect():
-        storage_used_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=10"
-        headers = {'Authorization': NBU_API_KEY, 'Accept': 'application/vnd.netbackup+json;version=6.0'}
-
-        storage_used_data_response = requests.get(storage_used_url, headers=headers, verify=False)
-        storage_used_data = storage_used_data_response.json()
+    # Метрики хранилища — собираем все страницы один раз
+    def storage_collect():
+        storage_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=200"
+        storage_data = fetch_all_pages(storage_url)
 
         gauge_storage_used_capacity.clear()
-
-        if 'data' in storage_used_data:
-            for storage_used in storage_used_data['data']:
-                attrs = storage_used.get('attributes', {})
-                storage_id = storage_used.get('id', 'unknown')
-                used_bytes = attrs.get('usedCapacityBytes')
-
-                gauge_storage_used_capacity.labels(storage_id=storage_id).set(used_bytes)
-
-    storage_used_collect()
-
-    # Total Capacity
-    def storage_total_collect():
-        storage_total_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=10"
-        headers = {'Authorization': NBU_API_KEY, 'Accept': 'application/vnd.netbackup+json;version=6.0'}
-
-        storage_total_data_response = requests.get(storage_total_url, headers=headers, verify=False)
-        storage_total_data = storage_total_data_response.json()
-
         gauge_storage_total_capacity.clear()
-
-        if 'data' in storage_total_data:
-            for storage_total in storage_total_data['data']:
-                attrs = storage_total.get('attributes', {})
-                storage_id = storage_total.get('id', 'unknown')
-                total_bytes = attrs.get('totalCapacityBytes')
-
-                gauge_storage_total_capacity.labels(storage_id=storage_id).set(total_bytes)
-
-    storage_total_collect()
-
-    # Free Capacity
-    def storage_free_collect():
-        storage_free_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=10"
-        headers = {'Authorization': NBU_API_KEY, 'Accept': 'application/vnd.netbackup+json;version=6.0'}
-
-        storage_free_data_response = requests.get(storage_free_url, headers=headers, verify=False)
-        storage_free_data = storage_free_data_response.json()
-
         gauge_storage_free_capacity.clear()
 
-        if 'data' in storage_free_data:
-            for storage_free in storage_free_data['data']:
-                attrs = storage_free.get('attributes', {})
-                storage_id = storage_free.get('id', 'unknown')
-                free_bytes = attrs.get('freeCapacityBytes')
+        for storage in storage_data:
+            attrs = storage.get('attributes', {})
+            storage_id = storage.get('id', 'unknown')
 
-                gauge_storage_free_capacity.labels(storage_id=storage_id).set(free_bytes)
+            gauge_storage_used_capacity.labels(storage_id=storage_id).set(attrs.get('usedCapacityBytes'))
+            gauge_storage_total_capacity.labels(storage_id=storage_id).set(attrs.get('totalCapacityBytes'))
+            gauge_storage_free_capacity.labels(storage_id=storage_id).set(attrs.get('freeCapacityBytes'))
 
-    storage_free_collect()
+    storage_collect()
 
 
 if __name__ == '__main__':
