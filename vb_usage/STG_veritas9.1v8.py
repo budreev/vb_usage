@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+import logging
+import sys
+import time
+from pathlib import Path
+from datetime import datetime, timedelta
+from urllib.parse import urljoin
+
 import requests
 import urllib3
 from prometheus_client import start_http_server, Gauge
-import time
-from datetime import datetime, timedelta
-from urllib.parse import urljoin
-import sys
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -20,6 +23,18 @@ HOURS_24 = 24
 
 # Отключение предупреждений о SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+LOG_FILE = Path(__file__).resolve().with_suffix('.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # Метрики Prometheus
 gauge_jobs_status = Gauge('nbu_jobs_status', 'Backup Job Status',
@@ -83,25 +98,36 @@ def is_within_24h(timestamp):
 
 # Собираем метрики
 def collect_metrics():
-    def fetch_all_pages(initial_url):
+    def fetch_all_pages(initial_url, label):
         """Получить все страницы ответа NetBackup, следуя ссылкам next."""
         url = initial_url
         visited = set()
+        page_count = 0
+        item_count = 0
 
         while url and url not in visited:
             visited.add(url)
+            page_count += 1
 
             response = session.get(url, headers=headers, verify=False, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             payload = response.json()
 
-            for item in payload.get('data', []):
+            current_page_items = payload.get('data', []) or []
+            item_count += len(current_page_items)
+            logger.info(
+                "Fetched %s page %s with %s items from %s", label, page_count, len(current_page_items), url
+            )
+
+            for item in current_page_items:
                 yield item
 
             links = payload.get('links', {}) or {}
             next_link = links.get('next')
             next_href = next_link.get('href') if isinstance(next_link, dict) else next_link
             url = urljoin(url, next_href) if next_href else None
+
+        logger.info("Finished fetching %s: %s pages, %s total items", label, page_count, item_count)
 
     # Метрики заданий
     def job_collect():
@@ -111,7 +137,7 @@ def collect_metrics():
         gauge_jobs_status.clear()
         gauge_24h_jobs_status.clear()
 
-        for job in fetch_all_pages(jobs_url):
+        for job in fetch_all_pages(jobs_url, "jobs"):
             attrs = job.get('attributes', {})
             job_id = job.get('id', 'unknown')
             start_time = parse_time(attrs.get('startTime'))
@@ -149,7 +175,7 @@ def collect_metrics():
         gauge_storage_total_capacity.clear()
         gauge_storage_free_capacity.clear()
 
-        for storage in fetch_all_pages(storage_url):
+        for storage in fetch_all_pages(storage_url, "storage-units"):
             attrs = storage.get('attributes', {})
             storage_id = storage.get('id', 'unknown')
 
