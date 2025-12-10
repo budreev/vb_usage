@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 import logging
+import os
 import sys
 import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 
+
 import requests
 import urllib3
 from prometheus_client import start_http_server, Gauge
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from dotenv import load_dotenv
 
-# Конфигурация
-NBU_API_URL = "https://xxx.xxx.xxx.xxx:443/netbackup"
-NBU_API_KEY = "xxxx"
-EXPORTER_PORT = 9988
-SCRAPE_INTERVAL = 30  # Интервал проверки
-REQUEST_TIMEOUT = 15  # Таймаут запросов в секундах
-MAX_RETRIES = 3  # Количество попыток повторного подключения
-HOURS_24 = 24
+load_dotenv()
+
+NBU_API_URL = os.getenv('NBU_API_URL')
+NBU_API_KEY = os.getenv('NBU_API_KEY')
+EXPORTER_PORT = os.getenv('EXPORTER_PORT')
+REQUEST_TIMEOUT = os.getenv('REQUEST_TIMEOUT')
+MAX_RETRIES = os.getenv('MAX_RETRIES')
+HOURS_24 = os.getenv('HOURS_24')
+SCRAPE_INTERVAL = os.getenv('SCRAPE_INTERVAL')
+
 
 # Отключение предупреждений о SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -91,7 +96,7 @@ def is_within_24h(timestamp):
     try:
         timestamp_float = float(timestamp)
         time_diff = time.time() - timestamp_float
-        return time_diff <= (HOURS_24 * 3600)
+        return time_diff <= float(HOURS_24 * 3600)
     except (ValueError, TypeError):
         return False
 
@@ -132,7 +137,7 @@ def collect_metrics():
     # Метрики заданий
     def job_collect():
         jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=200"
-        recent_threshold = (datetime.utcnow() - timedelta(hours=HOURS_24)).timestamp()
+        recent_threshold = (datetime.utcnow() - timedelta(hours=float(HOURS_24))).timestamp()
 
         gauge_jobs_status.clear()
         gauge_24h_jobs_status.clear()
@@ -192,4 +197,4 @@ if __name__ == '__main__':
 
     while True:
         collect_metrics()
-        time.sleep(SCRAPE_INTERVAL)
+        time.sleep(float(SCRAPE_INTERVAL))
