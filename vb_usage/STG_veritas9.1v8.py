@@ -106,7 +106,7 @@ def collect_metrics():
 
     # Метрики заданий
     def job_collect():
-        jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=200"
+        jobs_url = f"{NBU_API_URL}/admin/jobs?page%5Blimit%5D=100"
         job_data = fetch_all_pages(jobs_url)
 
         gauge_jobs_status.clear()
@@ -144,7 +144,7 @@ def collect_metrics():
 
     # Метрики хранилища — собираем все страницы один раз
     def storage_collect():
-        storage_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=200"
+        storage_url = f"{NBU_API_URL}/storage/storage-units?page%5Blimit%5D=100"
         storage_data = fetch_all_pages(storage_url)
 
         gauge_storage_used_capacity.clear()
